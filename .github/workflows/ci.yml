@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: Build & test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Run unit tests
+        run: swift test
+
+      - name: Build app bundle
+        run: ./build.sh
+
+      - name: Zip app (preserving permissions)
+        run: ditto -c -k --keepParent build/FileNameChange.app build/FileNameChange.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileNameChange.app
+          path: build/FileNameChange.app.zip
