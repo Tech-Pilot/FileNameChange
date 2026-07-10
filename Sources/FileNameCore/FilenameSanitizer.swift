@@ -11,6 +11,11 @@ enum FilenameSanitizer {
     static func sanitize(_ input: String) -> String {
         var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Newlines and whitespace runs become single spaces up front — the
+        // control-character strip below would otherwise delete newlines
+        // outright and merge the words around them.
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+
         // Path separators become hyphens so "Q3/Q4 Report" stays readable.
         text = text.replacingOccurrences(of: "/", with: "-")
         text = text.replacingOccurrences(of: "\\", with: "-")
