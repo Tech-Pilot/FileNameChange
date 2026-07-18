@@ -58,9 +58,13 @@ final class FilenameSanitizerTests: XCTestCase {
 
     func testKeepsZeroWidthJoiners() {
         // ZWJ/ZWNJ are legal in file names; stripping them corrupts emoji
-        // sequences and Persian/Arabic orthography.
+        // sequences and Persian/Arabic orthography. Check at the scalar level:
+        // String.contains respects grapheme boundaries, so a ZWJ inside an
+        // emoji cluster is invisible to a substring search.
         let family = "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Photos"
-        XCTAssertTrue(FilenameSanitizer.sanitize(family).contains("\u{200D}"))
+        let result = FilenameSanitizer.sanitize(family)
+        XCTAssertTrue(result.unicodeScalars.contains { $0.value == 0x200D })
+        XCTAssertTrue(result.contains("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"))
     }
 
     func testStripsBidiControlCharacters() {
