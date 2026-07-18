@@ -16,7 +16,7 @@ enum NamingEngine {
 
         case .apple:
             do {
-                let base = try await AppleIntelligenceNamer.suggestName(from: extraction)
+                let base = try await AppleIntelligenceNamer.suggestName(from: extraction, includeDate: prefs.includeDate)
                 return Result(base: styled(base, prefs: prefs), note: note("Apple Intelligence", extraction: extraction))
             } catch {
                 return fallback(for: extraction, prefs: prefs, engineName: "Apple Intelligence", error: error)
@@ -33,7 +33,12 @@ enum NamingEngine {
                 )
             }
             do {
-                let base = try await ClaudeNamer.suggestName(from: extraction, apiKey: apiKey, model: prefs.claudeModel)
+                let base = try await ClaudeNamer.suggestName(
+                    from: extraction,
+                    apiKey: apiKey,
+                    model: prefs.claudeModel,
+                    includeDate: prefs.includeDate
+                )
                 return Result(base: styled(base, prefs: prefs), note: note("Claude", extraction: extraction))
             } catch {
                 return fallback(for: extraction, prefs: prefs, engineName: "Claude", error: error)
@@ -47,18 +52,18 @@ enum NamingEngine {
     }
 
     private static func fallback(for extraction: PDFExtraction, prefs: Preferences, engineName: String, error: Error) -> Result {
-        let (base, _) = HeuristicNamer.suggest(from: extraction, prefs: prefs)
+        // Keep the heuristic's own note ("OCR used", "low confidence…") —
+        // those flags matter most exactly when an engine failure forced the
+        // fallback.
+        let (base, heuristicNote) = HeuristicNamer.suggest(from: extraction, prefs: prefs)
         let reason = (error as? NamingError)?.errorDescription ?? error.localizedDescription
-        return Result(base: base, note: "\(engineName) unavailable (\(reason)) — used built-in analysis")
+        return Result(base: base, note: "\(engineName) unavailable (\(reason)) — \(heuristicNote)")
     }
 
     private static func styled(_ base: String, prefs: Preferences) -> String {
-        // AI output is already nicely cased; only apply explicit overrides.
-        var text = base
-        if prefs.caseStyle == .lowercase {
-            text = text.lowercased()
-        }
-        text = FilenameSanitizer.applyStyle(to: text, caseStyle: .asIs, separator: prefs.separator)
+        // Apply the user's case preference in full — including Title Case —
+        // then the separator; sanitize last.
+        let text = FilenameSanitizer.applyStyle(to: base, caseStyle: prefs.caseStyle, separator: prefs.separator)
         return FilenameSanitizer.sanitize(text)
     }
 

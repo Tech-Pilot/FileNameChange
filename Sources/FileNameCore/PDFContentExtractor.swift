@@ -10,7 +10,6 @@ public struct PDFExtraction {
     public var fontTitle: String?
     /// Plain text of the first few pages.
     public var text: String
-    public var pageCount: Int
     public var usedOCR: Bool
 }
 
@@ -67,9 +66,12 @@ enum PDFContentExtractor {
 
         // A near-empty text layer usually means a scanned document: try OCR.
         var usedOCR = false
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).count < 40 {
+        let visibleTextCount = text.trimmingCharacters(in: .whitespacesAndNewlines).count
+        if visibleTextCount < 40 {
             let recognized = OCRService.recognizeText(in: document, maxPages: 2)
-            if recognized.trimmingCharacters(in: .whitespacesAndNewlines).count > text.count {
+            // Compare visible characters on both sides — a whitespace-stuffed
+            // text layer must not out-count real OCR output.
+            if recognized.trimmingCharacters(in: .whitespacesAndNewlines).count > visibleTextCount {
                 text = String(recognized.prefix(maxCharacters))
                 usedOCR = true
             }
@@ -80,7 +82,6 @@ enum PDFContentExtractor {
             metadataTitle: metadataTitle,
             fontTitle: fontTitle,
             text: text,
-            pageCount: pageCount,
             usedOCR: usedOCR
         )
     }
@@ -91,8 +92,14 @@ enum PDFContentExtractor {
         guard let attributed = page.attributedString, attributed.length > 0 else { return nil }
 
         let ns = attributed.string as NSString
-        let scanLength = min(ns.length, 4000)
+        var scanLength = min(ns.length, 4000)
         guard scanLength > 0 else { return nil }
+        // Snap the cut to a composed-character boundary so it can't split a
+        // surrogate pair and inject U+FFFD into the candidate title.
+        if scanLength < ns.length {
+            scanLength = ns.rangeOfComposedCharacterSequence(at: scanLength - 1).location
+            guard scanLength > 0 else { return nil }
+        }
         let scanRange = NSRange(location: 0, length: scanLength)
 
         // Collect font-size runs.
@@ -143,10 +150,6 @@ enum PDFContentExtractor {
             index += 1
         }
 
-        let candidate = pieces.joined(separator: " ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        return HeuristicNamer.isReasonableTitle(candidate) ? candidate : nil
+        return HeuristicNamer.validatedTitle(pieces.joined(separator: " "))
     }
 }

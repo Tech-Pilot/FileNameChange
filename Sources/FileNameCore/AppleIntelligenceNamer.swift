@@ -8,14 +8,6 @@ import FoundationModels
 /// must be built with the macOS 26 SDK for this code to be compiled in.
 enum AppleIntelligenceNamer {
 
-    static let instructions = """
-    You name PDF files based on their content. Reply with ONLY a file name base — no extension, no quotes, no explanations.
-    Use 3 to 10 words that say what the document is: its type, subject, and who it involves. \
-    If the document has one clearly primary date, start the name with it as YYYY-MM-DD followed by a space. \
-    Use Title Case with normal spaces. Never use slashes, colons, quotes, or periods. \
-    Write the name in the document's own language.
-    """
-
     /// nil when the engine can run right now; otherwise a human-readable reason.
     static var unavailabilityReason: String? {
         #if canImport(FoundationModels)
@@ -31,23 +23,19 @@ enum AppleIntelligenceNamer {
         #endif
     }
 
-    static func suggestName(from extraction: PDFExtraction) async throws -> String {
+    static func suggestName(from extraction: PDFExtraction, includeDate: Bool) async throws -> String {
         #if canImport(FoundationModels)
-        guard #available(macOS 26.0, *) else {
-            throw NamingError.engineUnavailable("Apple Intelligence naming needs macOS 26 or later.")
-        }
         if let reason = unavailabilityReason {
             throw NamingError.engineUnavailable(reason)
         }
-
-        let excerpt = String(extraction.text.prefix(2200))
-        var prompt = "Current file name: \(extraction.fileName).pdf\n"
-        if let title = extraction.metadataTitle, !title.isEmpty {
-            prompt += "PDF metadata title: \(title)\n"
+        guard #available(macOS 26.0, *) else {
+            // Unreachable: unavailabilityReason already covers this case, but
+            // the compiler needs the availability guard.
+            throw NamingError.engineUnavailable("Apple Intelligence naming needs macOS 26 or later.")
         }
-        prompt += "\nDocument text (first pages):\n\(excerpt)\n\nFile name:"
 
-        let session = LanguageModelSession(instructions: instructions)
+        let prompt = NamingPrompt.userPrompt(for: extraction, excerptLimit: 2200) + "\n\nFile name:"
+        let session = LanguageModelSession(instructions: NamingPrompt.rules(includeDate: includeDate))
         let response = try await session.respond(to: prompt)
         let cleaned = FilenameSanitizer.cleanAISuggestion(response.content)
         guard !cleaned.isEmpty else {
@@ -55,7 +43,7 @@ enum AppleIntelligenceNamer {
         }
         return cleaned
         #else
-        throw NamingError.engineUnavailable("This build doesn't include Apple Intelligence support.")
+        throw NamingError.engineUnavailable(unavailabilityReason ?? "Apple Intelligence isn't available in this build.")
         #endif
     }
 }

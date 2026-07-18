@@ -5,6 +5,35 @@ import Foundation
 enum FilenameSanitizer {
     static let maxLength = 110
 
+    /// Collapses every whitespace run (including newlines) into a single space.
+    static func collapseWhitespace(_ input: String) -> String {
+        input.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+
+    /// Characters that are illegal or unsafe in file names across macOS,
+    /// Windows shares, and cloud drives: the Windows-forbidden set, C0/DEL
+    /// control characters, and bidi-override characters (which can visually
+    /// spoof a name). Format characters like ZWJ/ZWNJ are deliberately kept —
+    /// they are legal in file names and removing them corrupts emoji
+    /// sequences and Persian/Arabic orthography.
+    private static let forbiddenScalars: CharacterSet = {
+        var set = CharacterSet(charactersIn: "<>|\"?*")
+        set.insert(charactersIn: UnicodeScalar(0x00)!...UnicodeScalar(0x1F)!)
+        set.insert(UnicodeScalar(0x7F)!)
+        set.insert(charactersIn: "\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}")
+        return set
+    }()
+
+    /// Names Windows reserves for devices, with or without an extension.
+    static let reservedWindowsNames: Set<String> = {
+        var names: Set<String> = ["CON", "PRN", "AUX", "NUL"]
+        for number in 1...9 {
+            names.insert("COM\(number)")
+            names.insert("LPT\(number)")
+        }
+        return names
+    }()
+
     /// Removes characters that are illegal or awkward in file names
     /// (macOS, Windows shares, cloud drives), collapses whitespace, and
     /// caps the length at a word boundary.
@@ -14,33 +43,48 @@ enum FilenameSanitizer {
         // Newlines and whitespace runs become single spaces up front — the
         // control-character strip below would otherwise delete newlines
         // outright and merge the words around them.
-        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        text = collapseWhitespace(text)
 
         // Path separators become hyphens so "Q3/Q4 Report" stays readable.
         text = text.replacingOccurrences(of: "/", with: "-")
         text = text.replacingOccurrences(of: "\\", with: "-")
         text = text.replacingOccurrences(of: ":", with: "-")
 
-        // Strip characters that break Windows/SMB/cloud sync, plus control chars.
-        let forbidden = CharacterSet(charactersIn: "<>|\"?*").union(.controlCharacters)
-        text = String(text.unicodeScalars.filter { !forbidden.contains($0) }.map(Character.init))
+        text = String(text.unicodeScalars.filter { !forbiddenScalars.contains($0) }.map(Character.init))
 
         // No hidden files, no trailing dots/spaces.
         while text.hasPrefix(".") { text.removeFirst() }
-        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        text = collapseWhitespace(text)
         text = text.replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: " .-_"))
 
         if text.count > maxLength {
             let cut = String(text.prefix(maxLength))
-            if let lastSpace = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: lastSpace) > 60 {
-                text = String(cut[..<lastSpace])
+            // Word boundaries can be spaces, hyphens, or underscores depending
+            // on the user's separator preference.
+            if let boundary = cut.lastIndex(where: { $0 == " " || $0 == "-" || $0 == "_" }),
+               cut.distance(from: cut.startIndex, to: boundary) > 60 {
+                text = String(cut[..<boundary])
             } else {
                 text = cut
             }
             text = text.trimmingCharacters(in: CharacterSet(charactersIn: " .-_"))
         }
+
+        if reservedWindowsNames.contains(text.uppercased()) {
+            text += " File"
+        }
         return text
+    }
+
+    /// Drops one trailing ".pdf" so pasting a full file name into the base
+    /// field doesn't produce "Name.pdf.pdf".
+    static func strippingPDFExtension(_ input: String) -> String {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasSuffix(".pdf") {
+            return String(trimmed.dropLast(4))
+        }
+        return trimmed
     }
 
     static let smallWords: Set<String> = [
@@ -113,9 +157,7 @@ enum FilenameSanitizer {
                 text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
             }
         }
-        if text.lowercased().hasSuffix(".pdf") {
-            text = String(text.dropLast(4))
-        }
+        text = strippingPDFExtension(text)
         return sanitize(text)
     }
 
@@ -125,13 +167,30 @@ enum FilenameSanitizer {
     }
 
     /// First non-existing URL in the file's directory for the given base name.
-    static func availableURL(in directory: URL, base: String, pathExtension: String) throws -> URL {
+    ///
+    /// `movingFrom` is the file being renamed: a candidate that is the same
+    /// file (differing only by case on case-insensitive volumes) is not a
+    /// collision — otherwise a capitalization-only rename would get a
+    /// spurious " 2" suffix.
+    static func availableURL(
+        in directory: URL,
+        base: String,
+        pathExtension: String,
+        movingFrom source: URL? = nil
+    ) throws -> URL {
         let fileManager = FileManager.default
+        let sourcePath = source?.standardizedFileURL.path
+
         for attempt in 1...200 {
             let name = candidateNames(base: base, attempt: attempt)
             let candidate = directory
                 .appendingPathComponent(name)
                 .appendingPathExtension(pathExtension)
+
+            if let sourcePath,
+               candidate.standardizedFileURL.path.compare(sourcePath, options: .caseInsensitive) == .orderedSame {
+                return candidate
+            }
             if !fileManager.fileExists(atPath: candidate.path) {
                 return candidate
             }

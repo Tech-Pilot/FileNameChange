@@ -125,6 +125,9 @@ func writePNG(pixelSize: Int, to url: URL) -> Bool {
     guard let context = NSGraphicsContext(bitmapImageRep: representation) else { return false }
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
+    // The bitmap's backing buffer isn't guaranteed to be zeroed; clear it so
+    // the corners outside the rounded square are transparent, not garbage.
+    context.cgContext.clear(CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
     drawIcon(in: NSRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
     context.flushGraphics()
     NSGraphicsContext.restoreGraphicsState()

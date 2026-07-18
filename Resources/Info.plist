@@ -32,6 +32,16 @@
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Built with the FileNameChange open-source project.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>FileNameChange renames the PDFs you choose right where they live, so it needs access to the folder that contains them.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>FileNameChange renames the PDFs you choose right where they live, so it needs access to the folder that contains them.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>FileNameChange renames the PDFs you choose right where they live, so it needs access to the folder that contains them.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>FileNameChange renames the PDFs you choose right where they live, so it needs access to the drive that contains them.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>FileNameChange renames the PDFs you choose right where they live, so it needs access to the volume that contains them.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

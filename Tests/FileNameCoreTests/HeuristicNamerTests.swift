@@ -49,17 +49,37 @@ final class HeuristicNamerTests: XCTestCase {
         XCTAssertEqual(HeuristicNamer.countOccurrences(of: "invoice", in: "invoice invoices"), 1)
     }
 
+    func testDigitPatternsNeedBoundariesToo() {
+        // "1099" must not match inside a longer number like an order ID.
+        XCTAssertEqual(HeuristicNamer.countOccurrences(of: "1099", in: "order 31099 ships in july"), 0)
+        XCTAssertEqual(HeuristicNamer.countOccurrences(of: "1099", in: "form 1099 attached"), 1)
+    }
+
     func testDetectDatePrefersLabeledDate() {
         let text = """
         Some Corp
         Payment due within 30 days of December 31, 2030.
         Invoice Date: March 3, 2024
         """
-        let date = HeuristicNamer.detectDate(in: text)
-        XCTAssertNotNil(date)
-        if let date {
-            XCTAssertEqual(HeuristicNamer.isoDayFormatter.string(from: date), "2024-03-03")
+        let detected = HeuristicNamer.detectDate(in: text)
+        XCTAssertNotNil(detected)
+        if let detected {
+            XCTAssertEqual(HeuristicNamer.isoDayString(from: detected), "2024-03-03")
         }
+    }
+
+    func testDetectDateRejectsTimeOnlyMatches() {
+        // A bare time resolves to "today", which would stamp the scan date
+        // on the file instead of the document's own date.
+        XCTAssertNil(HeuristicNamer.detectDate(in: "Check-out 11:00 AM\nThank you for staying with us"))
+    }
+
+    func testLooksLikeCalendarDate() {
+        XCTAssertTrue(HeuristicNamer.looksLikeCalendarDate("March 3, 2024"))
+        XCTAssertTrue(HeuristicNamer.looksLikeCalendarDate("12/04/2023"))
+        XCTAssertTrue(HeuristicNamer.looksLikeCalendarDate("3/5"))
+        XCTAssertFalse(HeuristicNamer.looksLikeCalendarDate("11:00 AM"))
+        XCTAssertFalse(HeuristicNamer.looksLikeCalendarDate("noon"))
     }
 
     func testFirstGoodLineSkipsBoilerplate() {
@@ -86,19 +106,41 @@ final class HeuristicNamerTests: XCTestCase {
         analysis.title = "Thank You For Your Business"
         analysis.kind = HeuristicNamer.DocumentKind(label: "Invoice", isStrong: true)
         analysis.organization = "Acme"
-        analysis.date = HeuristicNamer.isoDayFormatter.date(from: "2024-03-03")
+        analysis.date = HeuristicNamer.isoDayFormatter.date(from: "2024-03-03").map {
+            HeuristicNamer.DetectedDate(date: $0, timeZone: nil)
+        }
 
         let extraction = PDFExtraction(
             fileName: "scan_0042",
             metadataTitle: nil,
             fontTitle: nil,
             text: "",
-            pageCount: 1,
             usedOCR: false
         )
         let (base, isWeak) = HeuristicNamer.compose(analysis, extraction: extraction, prefs: Preferences())
         XCTAssertEqual(base, "2024-03-03 Acme Invoice")
         XCTAssertFalse(isWeak)
+    }
+
+    func testComposeResumeGetsNoDatePrefix() {
+        // Date prefixes are for transactional documents; a resume's first
+        // detected date is usually incidental (graduation year etc.).
+        var analysis = HeuristicNamer.Analysis()
+        analysis.kind = HeuristicNamer.DocumentKind(label: "Resume", isStrong: false)
+        analysis.person = "Jane Doe"
+        analysis.date = HeuristicNamer.isoDayFormatter.date(from: "2019-05-15").map {
+            HeuristicNamer.DetectedDate(date: $0, timeZone: nil)
+        }
+
+        let extraction = PDFExtraction(
+            fileName: "resume_final",
+            metadataTitle: nil,
+            fontTitle: nil,
+            text: "",
+            usedOCR: false
+        )
+        let (base, _) = HeuristicNamer.compose(analysis, extraction: extraction, prefs: Preferences())
+        XCTAssertEqual(base, "Jane Doe Resume")
     }
 
     func testComposeFallsBackToOriginalFileName() {
@@ -107,12 +149,25 @@ final class HeuristicNamerTests: XCTestCase {
             metadataTitle: nil,
             fontTitle: nil,
             text: "",
-            pageCount: 1,
             usedOCR: false
         )
         let (base, isWeak) = HeuristicNamer.compose(HeuristicNamer.Analysis(), extraction: extraction, prefs: Preferences())
         XCTAssertEqual(base, "mystery")
         XCTAssertTrue(isWeak)
+    }
+
+    func testSuggestNeverProducesAnUnusableName() {
+        // A file whose raw name sanitizes to nothing must still get a
+        // suggestion that survives sanitizing (otherwise it can't be applied).
+        let extraction = PDFExtraction(
+            fileName: "____",
+            metadataTitle: nil,
+            fontTitle: nil,
+            text: "",
+            usedOCR: false
+        )
+        let (base, _) = HeuristicNamer.suggest(from: extraction, prefs: Preferences())
+        XCTAssertFalse(FilenameSanitizer.sanitize(base).isEmpty)
     }
 
     func testOrgKindNameAvoidsDuplication() {

@@ -11,6 +11,7 @@ public struct SettingsView: View {
     @State private var apiKey: String = KeychainStore.loadAPIKey()
     @State private var verifyResult: String?
     @State private var isVerifying = false
+    @State private var keySaveTask: Task<Void, Never>?
 
     public init() {}
 
@@ -76,6 +77,10 @@ public struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 520, height: 460)
+        .onDisappear {
+            keySaveTask?.cancel()
+            KeychainStore.saveAPIKey(apiKey)
+        }
     }
 
     @ViewBuilder
@@ -83,8 +88,16 @@ public struct SettingsView: View {
         SecureField("API key (sk-ant-…)", text: $apiKey)
             .textFieldStyle(.roundedBorder)
             .onChange(of: apiKey) { newValue in
-                KeychainStore.saveAPIKey(newValue)
                 verifyResult = nil
+                // Debounce: a Keychain write per keystroke is a synchronous
+                // IPC round-trip, and analyses reading mid-typing would see
+                // a truncated key.
+                keySaveTask?.cancel()
+                keySaveTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    guard !Task.isCancelled else { return }
+                    KeychainStore.saveAPIKey(newValue)
+                }
             }
 
         TextField("Model", text: $claudeModel)
@@ -94,8 +107,11 @@ public struct SettingsView: View {
             Button(isVerifying ? "Verifying…" : "Verify Key") {
                 isVerifying = true
                 verifyResult = nil
-                let key = apiKey
+                // Verify exactly what analyses will use: the trimmed key
+                // and the resolved model.
+                let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
                 let model = claudeModel
+                KeychainStore.saveAPIKey(apiKey)
                 Task { @MainActor in
                     do {
                         try await ClaudeNamer.verify(apiKey: key, model: model)
@@ -106,7 +122,7 @@ public struct SettingsView: View {
                     isVerifying = false
                 }
             }
-            .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty || isVerifying)
+            .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isVerifying)
 
             if let verifyResult {
                 Text(verifyResult)
@@ -115,7 +131,7 @@ public struct SettingsView: View {
             }
         }
 
-        Text("The key is stored in your macOS Keychain. Only the first pages of each PDF are sent to the API — swap in claude-haiku-4-5-20251001 for the fastest, cheapest naming.")
+        Text("The key is stored in your macOS Keychain. The file's name and the first pages of its text are sent to the API — swap in claude-haiku-4-5 for the fastest, cheapest naming.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Link("Get an API key at console.anthropic.com", destination: URL(string: "https://console.anthropic.com/")!)

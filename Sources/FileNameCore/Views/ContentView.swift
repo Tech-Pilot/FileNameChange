@@ -63,8 +63,8 @@ public struct ContentView: View {
                 } label: {
                     Label("Clear Renamed", systemImage: "checkmark.circle")
                 }
-                .disabled(queue.renamedCount == 0)
-                .help("Remove renamed files from the list")
+                .disabled(queue.finishedCount == 0)
+                .help("Remove renamed and reverted files from the list")
             }
         }
         .navigationTitle("FileNameChange")

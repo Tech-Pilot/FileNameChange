@@ -1,14 +1,11 @@
 import Foundation
 
 enum NamingError: LocalizedError {
-    case noAPIKey
     case engineUnavailable(String)
     case badResponse(String)
 
     var errorDescription: String? {
         switch self {
-        case .noAPIKey:
-            return "No Claude API key set."
         case .engineUnavailable(let reason):
             return reason
         case .badResponse(let message):
@@ -21,25 +18,15 @@ enum NamingError: LocalizedError {
 enum ClaudeNamer {
     static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
 
-    static let systemPrompt = """
-    You name PDF files based on their content. Reply with ONLY a file name base — no extension, no quotes, no explanations, nothing else.
-
-    Rules:
-    - 3 to 10 words that say what the document is: its type, subject, and who it involves.
-    - If the document has one clearly primary date (invoice date, statement date, letter date), start with it as YYYY-MM-DD followed by a space.
-    - Include the company, institution, or person the document is about when that helps identify it.
-    - Use Title Case with normal spaces. Never use slashes, colons, quotes, or periods.
-    - Write the name in the document's own language.
-    """
-
     struct Request: Encodable {
         struct Message: Encodable {
             let role: String
             let content: String
         }
+        // No sampling parameters: current Claude models (Sonnet 5 and later)
+        // reject non-default `temperature` with HTTP 400.
         let model: String
         let max_tokens: Int
-        let temperature: Double
         let system: String
         let messages: [Message]
     }
@@ -60,23 +47,19 @@ enum ClaudeNamer {
         let error: Detail?
     }
 
-    static func suggestName(from extraction: PDFExtraction, apiKey: String, model: String) async throws -> String {
-        let excerpt = String(extraction.text.prefix(3500))
-        var prompt = "Current file name: \(extraction.fileName).pdf\n"
-        if let title = extraction.metadataTitle, !title.isEmpty {
-            prompt += "PDF metadata title: \(title)\n"
-        }
-        prompt += "\nDocument text (first pages):\n\(excerpt)"
-        if excerpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            prompt += "\n(No text could be extracted from this PDF.)"
-        }
+    /// Falls back to the default model when the Settings field is empty or
+    /// whitespace, and strips stray whitespace a paste can bring along.
+    static func resolvedModel(_ model: String) -> String {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? PrefKey.defaultClaudeModel : trimmed
+    }
 
+    static func suggestName(from extraction: PDFExtraction, apiKey: String, model: String, includeDate: Bool) async throws -> String {
         let body = Request(
-            model: model.isEmpty ? PrefKey.defaultClaudeModel : model,
+            model: resolvedModel(model),
             max_tokens: 200,
-            temperature: 0.2,
-            system: systemPrompt,
-            messages: [Request.Message(role: "user", content: prompt)]
+            system: NamingPrompt.rules(includeDate: includeDate),
+            messages: [Request.Message(role: "user", content: NamingPrompt.userPrompt(for: extraction, excerptLimit: 3500))]
         )
 
         let text = try await send(body: body, apiKey: apiKey)
@@ -90,9 +73,8 @@ enum ClaudeNamer {
     /// Tiny round-trip used by the "Verify" button in Settings.
     static func verify(apiKey: String, model: String) async throws {
         let body = Request(
-            model: model.isEmpty ? PrefKey.defaultClaudeModel : model,
+            model: resolvedModel(model),
             max_tokens: 8,
-            temperature: 0,
             system: "Reply with OK.",
             messages: [Request.Message(role: "user", content: "OK?")]
         )
@@ -104,7 +86,9 @@ enum ClaudeNamer {
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        // A pasted key can carry a trailing newline; a newline in a header
+        // value makes the request fail outright.
+        request.setValue(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.httpBody = try JSONEncoder().encode(body)
 

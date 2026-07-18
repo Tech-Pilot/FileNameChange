@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
 
+# A push to a branch with an open PR fires both triggers for the same
+# commit; keying the group on the SHA lets the duplicate run cancel out.
+concurrency:
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build & test (macOS)
@@ -17,8 +23,17 @@ jobs:
       - name: Run unit tests
         run: swift test
 
-      - name: Build app bundle
-        run: ./build.sh
+      - name: Build universal app bundle and disk image
+        run: ./build.sh --universal --dmg
+
+      - name: Verify the binary is universal
+        run: |
+          archs="$(lipo -archs build/FileNameChange.app/Contents/MacOS/FileNameChange)"
+          echo "architectures: ${archs}"
+          case "${archs}" in
+            *arm64*x86_64*|*x86_64*arm64*) ;;
+            *) echo "error: expected a universal binary, got: ${archs}" >&2; exit 1 ;;
+          esac
 
       - name: Zip app (preserving permissions)
         run: ditto -c -k --keepParent build/FileNameChange.app build/FileNameChange.app.zip
@@ -28,3 +43,9 @@ jobs:
         with:
           name: FileNameChange.app
           path: build/FileNameChange.app.zip
+
+      - name: Upload disk image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileNameChange.dmg
+          path: build/FileNameChange-*.dmg

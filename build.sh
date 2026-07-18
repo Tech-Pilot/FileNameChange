@@ -5,6 +5,7 @@
 #   ./build.sh --run        build, then open it
 #   ./build.sh --install    build, then copy it to /Applications
 #   ./build.sh --universal  build a fat Intel + Apple silicon binary
+#   ./build.sh --dmg        build, then package a drag-to-Applications disk image
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,14 +14,17 @@ APP_NAME="FileNameChange"
 UNIVERSAL=0
 INSTALL=0
 RUN=0
+DMG=0
 
 for arg in "$@"; do
   case "${arg}" in
     --universal) UNIVERSAL=1 ;;
     --install)   INSTALL=1 ;;
     --run)       RUN=1 ;;
+    --dmg)       DMG=1 ;;
     -h|--help)
-      grep '^# ' "$0" | sed 's/^# //'
+      # Print the contiguous header comment block (usage) and nothing else.
+      awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
       exit 0
       ;;
     *)
@@ -62,6 +66,7 @@ rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
 cp Resources/Info.plist "${APP}/Contents/Info.plist"
+printf 'APPL????' > "${APP}/Contents/PkgInfo"
 
 # App icon -- nice to have, never fatal.
 if command -v iconutil >/dev/null 2>&1; then
@@ -81,6 +86,20 @@ codesign --force -s - "${APP}" >/dev/null 2>&1 ||
   echo "==> Note: ad-hoc code signing failed; a locally built app should still run"
 
 echo "OK: built ${APP}"
+
+if [[ "${DMG}" == 1 ]]; then
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")"
+  DMG_PATH="build/${APP_NAME}-${VERSION}.dmg"
+  STAGING="build/dmg-staging"
+  echo "==> Packaging ${DMG_PATH}..."
+  rm -rf "${STAGING}" "${DMG_PATH}"
+  mkdir -p "${STAGING}"
+  cp -R "${APP}" "${STAGING}/"
+  ln -s /Applications "${STAGING}/Applications"
+  hdiutil create -volname "${APP_NAME}" -srcfolder "${STAGING}" -ov -format UDZO "${DMG_PATH}" >/dev/null
+  rm -rf "${STAGING}"
+  echo "OK: created ${DMG_PATH} (open it and drag ${APP_NAME}.app onto Applications)"
+fi
 
 if [[ "${INSTALL}" == 1 ]]; then
   rm -rf "/Applications/${APP_NAME}.app"

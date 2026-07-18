@@ -33,7 +33,9 @@ struct ItemRow: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
-                } else {
+                } else if !item.status.isFailed {
+                    // Failed items show their message in red below; showing
+                    // statusLabel too would print the same error twice.
                     Text(item.statusLabel)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -73,6 +75,11 @@ struct ItemRow: View {
             Button("Analyze Again") {
                 queue.analyze(itemID: item.id)
             }
+            .disabled(item.status.isBusy)
+            Button("Revert to Original Name") {
+                queue.revert(itemID: item.id)
+            }
+            .disabled(item.status.isBusy || !item.isRenamedOnDisk)
             Button("Copy Suggested Name") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(item.editedBase, forType: .string)
@@ -107,6 +114,13 @@ struct ItemRow: View {
                 }
                 .controlSize(.small)
             }
+        case .reverted:
+            // Reverting is a deliberate choice: the item stays out of
+            // "Rename All", but the user can still redo it by hand.
+            Button("Rename") {
+                queue.applyRename(itemID: item.id)
+            }
+            .controlSize(.small)
         case .failed:
             Button("Retry") {
                 queue.retry(itemID: item.id)

@@ -10,13 +10,21 @@ enum HeuristicNamer {
         var kind: DocumentKind?
         var organization: String?
         var person: String?
-        var date: Date?
+        var date: DetectedDate?
     }
 
     struct DocumentKind: Equatable {
         var label: String
         /// Transactional kinds (invoices, statements…) beat vague titles.
         var isStrong: Bool
+    }
+
+    /// A detected document date plus the time zone printed next to it, when
+    /// the text named one — formatting must honor it or "11:50 PM PST" can
+    /// land on the wrong calendar day for users in distant time zones.
+    struct DetectedDate: Equatable {
+        var date: Date
+        var timeZone: TimeZone?
     }
 
     // MARK: - Entry point
@@ -29,7 +37,12 @@ enum HeuristicNamer {
         base = FilenameSanitizer.sanitize(base)
 
         if base.isEmpty {
-            base = extraction.fileName
+            // The original name is the last resort — but it has to survive
+            // sanitizing too, or the suggestion could never be applied.
+            base = FilenameSanitizer.sanitize(extraction.fileName)
+            if base.isEmpty {
+                base = "Untitled PDF"
+            }
             isWeak = true
         }
 
@@ -55,14 +68,12 @@ enum HeuristicNamer {
 
     static func compose(_ analysis: Analysis, extraction: PDFExtraction, prefs: Preferences) -> (base: String, isWeak: Bool) {
         var base: String?
-        var cameFromParts = false
         var isWeak = false
 
         let personKinds = ["Resume", "CV", "Cover Letter", "Certificate"]
 
         if let kind = analysis.kind, personKinds.contains(kind.label), let person = analysis.person {
             base = "\(person) \(kind.label)"
-            cameFromParts = true
         } else if let kind = analysis.kind, kind.isStrong {
             // "Acme Invoice", "Chase Bank Statement" — org + kind reads best
             // for transactional documents, even when a title-ish line exists.
@@ -71,7 +82,6 @@ enum HeuristicNamer {
             } else {
                 base = analysis.title ?? kind.label
             }
-            cameFromParts = true
         } else if let title = analysis.title {
             base = title
         } else if let kind = analysis.kind {
@@ -80,10 +90,8 @@ enum HeuristicNamer {
             } else {
                 base = kind.label
             }
-            cameFromParts = true
         } else if let org = analysis.organization {
             base = "\(org) Document"
-            cameFromParts = true
             isWeak = true
         }
 
@@ -94,9 +102,10 @@ enum HeuristicNamer {
         result = truncateWords(result, maxWords: 12)
 
         // Date prefixes make transactional documents sort beautifully; they'd
-        // just be noise in front of a real title.
-        if cameFromParts, prefs.includeDate, let date = analysis.date {
-            result = "\(isoDayFormatter.string(from: date)) \(result)"
+        // just be noise in front of titles, resumes, and other non-transactional
+        // documents (whose first detected date is usually incidental).
+        if analysis.kind?.isStrong == true, prefs.includeDate, let detected = analysis.date {
+            result = "\(isoDayString(from: detected)) \(result)"
         }
         return (result, isWeak)
     }
@@ -137,8 +146,7 @@ enum HeuristicNamer {
 
     static func validatedTitle(_ candidate: String?) -> String? {
         guard let candidate else { return nil }
-        let cleaned = candidate
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let cleaned = FilenameSanitizer.collapseWhitespace(candidate)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return isReasonableTitle(cleaned) ? cleaned : nil
     }
@@ -165,8 +173,7 @@ enum HeuristicNamer {
                 .replacingOccurrences(of: "_", with: " ")
                 .replacingOccurrences(of: "-", with: " ")
         }
-        title = title
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        title = FilenameSanitizer.collapseWhitespace(title)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // A metadata title that's just the current file name tells us nothing new.
@@ -314,39 +321,61 @@ enum HeuristicNamer {
         ])
     ]
 
+    /// The kind patterns never change, so compile each once instead of on
+    /// every document (and every pattern) analyzed.
+    private static let compiledKindRules: [(label: String, isStrong: Bool, patterns: [(regex: NSRegularExpression, weight: Int)])] = {
+        kindRules.map { rule in
+            let compiled = rule.patterns.compactMap { entry -> (NSRegularExpression, Int)? in
+                guard let regex = boundaryRegex(for: entry.pattern) else { return nil }
+                return (regex, entry.weight)
+            }
+            return (rule.label, rule.isStrong, compiled)
+        }
+    }()
+
     static func detectKind(in text: String) -> DocumentKind? {
         let lowered = String(text.prefix(6000)).lowercased()
         guard !lowered.isEmpty else { return nil }
         let head = String(lowered.prefix(300))
 
-        var best: (rule: KindRule, score: Int)?
-        for rule in kindRules {
+        var best: (label: String, isStrong: Bool, score: Int)?
+        for rule in compiledKindRules {
             var score = 0
-            for (pattern, weight) in rule.patterns {
-                let occurrences = countOccurrences(of: pattern, in: lowered)
+            for (regex, weight) in rule.patterns {
+                let occurrences = matchCount(of: regex, in: lowered)
                 if occurrences > 0 {
                     score += weight * min(occurrences, 3)
-                    if head.contains(pattern) {
+                    if matchCount(of: regex, in: head) > 0 {
                         score += 3
                     }
                 }
             }
             if score >= 3, score > (best?.score ?? 0) {
-                best = (rule, score)
+                best = (rule.label, rule.isStrong, score)
             }
         }
         guard let best else { return nil }
-        return DocumentKind(label: best.rule.label, isStrong: best.rule.isStrong)
+        return DocumentKind(label: best.label, isStrong: best.isStrong)
+    }
+
+    /// Word boundaries keep short patterns from matching inside other words —
+    /// or inside longer numbers, so "1099" doesn't fire on "31099".
+    private static func boundaryRegex(for pattern: String) -> NSRegularExpression? {
+        let escaped = NSRegularExpression.escapedPattern(for: pattern)
+        let first = pattern.first
+        let leading = (first?.isLetter == true || first?.isNumber == true) ? "\\b" : ""
+        let last = pattern.last
+        let trailing = (last?.isLetter == true || last?.isNumber == true) ? "\\b" : ""
+        return try? NSRegularExpression(pattern: leading + escaped + trailing, options: [])
+    }
+
+    private static func matchCount(of regex: NSRegularExpression, in text: String) -> Int {
+        regex.numberOfMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text))
     }
 
     static func countOccurrences(of pattern: String, in text: String) -> Int {
-        // Word boundaries keep short patterns from matching inside other words.
-        let escaped = NSRegularExpression.escapedPattern(for: pattern)
-        let leading = pattern.first?.isLetter == true ? "\\b" : ""
-        let last = pattern.last
-        let trailing = (last?.isLetter == true || last?.isNumber == true) ? "\\b" : ""
-        guard let regex = try? NSRegularExpression(pattern: leading + escaped + trailing, options: []) else { return 0 }
-        return regex.numberOfMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text))
+        guard let regex = boundaryRegex(for: pattern) else { return 0 }
+        return matchCount(of: regex, in: text)
     }
 
     // MARK: - Entities
@@ -449,9 +478,22 @@ enum HeuristicNamer {
         return formatter
     }()
 
+    /// Formats the detected date in the time zone the document printed it in
+    /// (falling back to the user's local zone for plain dates).
+    static func isoDayString(from detected: DetectedDate) -> String {
+        guard let timeZone = detected.timeZone else {
+            return isoDayFormatter.string(from: detected.date)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = timeZone
+        return formatter.string(from: detected.date)
+    }
+
     /// Picks the document's "main" date: prefers one sitting next to a label
     /// like "Invoice date:", otherwise the first plausible date in the text.
-    static func detectDate(in text: String) -> Date? {
+    static func detectDate(in text: String) -> DetectedDate? {
         let sample = String(text.prefix(3000))
         guard !sample.isEmpty else { return nil }
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) else {
@@ -469,9 +511,13 @@ enum HeuristicNamer {
                 let start = labelMatch.range.location + labelMatch.range.length
                 let length = min(40, nsSample.length - start)
                 guard length > 4 else { continue }
-                let window = nsSample.substring(with: NSRange(location: start, length: length))
-                if let date = firstPlausibleDate(in: window, detector: detector) {
-                    return date
+                // Snap to composed-character boundaries so the window never
+                // splits a surrogate pair.
+                let window = nsSample.substring(
+                    with: nsSample.rangeOfComposedCharacterSequences(for: NSRange(location: start, length: length))
+                )
+                if let detected = firstPlausibleDate(in: window, detector: detector) {
+                    return detected
                 }
             }
         }
@@ -479,7 +525,7 @@ enum HeuristicNamer {
         return firstPlausibleDate(in: sample, detector: detector)
     }
 
-    static func firstPlausibleDate(in text: String, detector: NSDataDetector) -> Date? {
+    static func firstPlausibleDate(in text: String, detector: NSDataDetector) -> DetectedDate? {
         let matches = detector.matches(in: text, options: [], range: NSRange(text.startIndex..., in: text))
         let calendar = Calendar(identifier: .gregorian)
         let now = Date()
@@ -488,10 +534,29 @@ enum HeuristicNamer {
 
         for match in matches {
             guard let date = match.date else { continue }
+            // A bare time ("Check-out 11:00 AM") also produces a date match —
+            // anchored to TODAY, which would stamp the scan date on the file.
+            guard let matchRange = Range(match.range, in: text),
+                  looksLikeCalendarDate(String(text[matchRange])) else { continue }
             if date >= lowerBound && date <= upperBound {
-                return date
+                return DetectedDate(date: date, timeZone: match.timeZone)
             }
         }
         return nil
+    }
+
+    private static let monthWords: [String] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"
+    ]
+
+    /// True when the matched text actually names a calendar day — a year, a
+    /// month word, or a numeric day/month pair — rather than just a time.
+    static func looksLikeCalendarDate(_ matchedText: String) -> Bool {
+        let lowered = matchedText.lowercased()
+        if lowered.range(of: "\\d{4}", options: .regularExpression) != nil { return true }
+        if monthWords.contains(where: { lowered.contains($0) }) { return true }
+        if lowered.range(of: "\\d{1,2}\\s*[./-]\\s*\\d{1,2}", options: .regularExpression) != nil { return true }
+        if lowered.contains("today") || lowered.contains("yesterday") || lowered.contains("tomorrow") { return true }
+        return false
     }
 }
